@@ -1,0 +1,48 @@
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
+from starlette.middleware.cors import CORSMiddleware
+
+from app.ai_engine import analyze_image, analyze_audio
+from app.database import log_violation
+
+app = FastAPI()
+
+
+@app.get("/")
+def health_check():
+    return {"status": "AI Proctor is Active"}
+
+@app.post("/analyze")
+async def analyze_session(
+    background_tasks: BackgroundTasks,
+    session_id: str = Form(...),
+    image: UploadFile = File(None),
+    audio: UploadFile = File(None)
+):
+    """
+    Receives files, runs AI instantly, and logs to DB in background
+    so we don't slow down the response.
+    """
+    flags = []
+
+    # 1. Image Analysis
+    if image:
+        img_bytes = await image.read()
+        visual_flag = analyze_image(img_bytes)
+        if visual_flag:
+            flags.append(visual_flag)
+            # Send database work to background task
+            background_tasks.add_task(log_violation, session_id, visual_flag, img_bytes, "jpg")
+
+    # 2. Audio Analysis
+    if audio:
+        audio_bytes = await audio.read()
+        audio_flag = analyze_audio(audio_bytes)
+        if audio_flag:
+            flags.append(audio_flag)
+            background_tasks.add_task(log_violation, session_id, audio_flag, audio_bytes, "wav")
+
+    return {
+        "status": "processed", 
+        "flags_detected": flags,
+        "action": "warning" if flags else "ok"
+    }
