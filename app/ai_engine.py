@@ -14,6 +14,37 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 1. Initialize VAD
+try:
+    vad = webrtcvad.Vad(3)
+except Exception as e:
+    logger.warning(f"VAD init failed: {e}")
+    vad = None
+
+# 2. Initialize YOLO
+try:
+    # Assuming yolov8n.pt is in the current working directory
+    model = YOLO("yolov8n.pt")
+except Exception as e:
+    logger.error(f"YOLO init failed: {e}")
+    model = None
+
+# 3. Initialize MediaPipe Face Landmarker
+try:
+    base_options = mp_python.BaseOptions(model_asset_path='face_landmarker.task')
+    options = vision.FaceLandmarkerOptions(base_options=base_options,
+                                           output_face_blendshapes=True,
+                                           output_facial_transformation_matrixes=True,
+                                           num_faces=2)
+    face_landmarker = vision.FaceLandmarker.create_from_options(options)
+except Exception as e:
+    logger.error(f"MediaPipe init failed: {e}")
+    face_landmarker = None
+
 # Configurable suspicious objects list
 default_objects = "cell phone,remote,book,laptop,tablet"
 sus_objects_env = os.environ.get("SUSPICIOUS_OBJECTS", default_objects)
