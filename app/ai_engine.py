@@ -129,44 +129,42 @@ def analyze_image(image_bytes: bytes) -> str:
             lm = landmarks[idx]
             return (lm.x * img_w, lm.y * img_h)
 
-        # Gaze Detection
-        try:
-            left_iris = get_point(LEFT_IRIS_CENTER)
-            left_inner = get_point(LEFT_EYE_INNER)
-            left_outer = get_point(LEFT_EYE_OUTER)
-            
-            right_iris = get_point(RIGHT_IRIS_CENTER)
-            right_inner = get_point(RIGHT_EYE_INNER)
-            right_outer = get_point(RIGHT_EYE_OUTER)
-            
-            left_eye_width = abs(left_outer[0] - left_inner[0])
-            right_eye_width = abs(right_outer[0] - right_inner[0])
-            
-            if left_eye_width > 0 and right_eye_width > 0:
-                left_gaze_ratio = (left_iris[0] - left_outer[0]) / left_eye_width
-                right_gaze_ratio = (right_iris[0] - right_outer[0]) / right_eye_width
-                avg_gaze_ratio = (left_gaze_ratio + right_gaze_ratio) / 2
-                
-                if avg_gaze_ratio < 0.25 or avg_gaze_ratio > 0.75:
-                    logger.info(f"Gaze averted: ratio={avg_gaze_ratio:.2f}")
-                    return "gaze_averted"
-        except (IndexError, KeyError):
-            pass
-
-        # Head Pose
+        # Head Pose Detection (Pitch & Yaw)
         try:
             nose = get_point(NOSE_TIP)
             left_ear = get_point(LEFT_EAR)
             right_ear = get_point(RIGHT_EAR)
             
             face_center_x = (left_ear[0] + right_ear[0]) / 2
+            avg_ear_y = (left_ear[1] + right_ear[1]) / 2
             face_width = abs(right_ear[0] - left_ear[0])
             
             if face_width > 0:
-                nose_offset = abs(nose[0] - face_center_x) / face_width
-                if nose_offset > 0.30:
-                    logger.info(f"Head turned: nose_offset={nose_offset:.2f}")
-                    return "head_turned"
+                # 1. Yaw (Head Turned Left/Right)
+                # Calculate horizontal offset relative to face width
+                nose_offset_x = abs(nose[0] - face_center_x) / face_width
+                
+                if nose_offset_x > 0.30:
+                    logger.info(f"Head turned sideways: offset={nose_offset_x:.2f}")
+                    return "head_turned_sideways"
+
+                # 2. Pitch (Head Up/Down)
+                # Calculate vertical offset relative to face width
+                
+                # In image coordinates (Y increases downwards):
+                # - Looking DOWN: Nose moves DOWN (Y increases) -> (avg_ear_y - nose_y) becomes more negative
+                # - Looking UP: Nose moves UP (Y decreases) -> (avg_ear_y - nose_y) becomes positive
+                
+                vertical_offset = (avg_ear_y - nose[1]) / face_width
+                
+                # Threshold for Looking UP
+                # A positive value means nose is ABOVE the ear line.
+                if vertical_offset > 0.20:
+                    logger.info(f"Head turned up: offset={vertical_offset:.2f}")
+                    return "head_turned_up"
+                    
+                # We specifically ALLOW looking down (negative vertical_offset), so no check for that.
+                
         except (IndexError, KeyError):
             pass
 
