@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # 1. Initialize VAD
 try:
-    vad = webrtcvad.Vad(3)
+    vad = webrtcvad.Vad(2)
 except Exception as e:
     logger.warning(f"VAD init failed: {e}")
     vad = None
@@ -177,9 +177,9 @@ def analyze_image(image_bytes: bytes) -> str:
 
 def analyze_audio(audio_bytes: bytes) -> str:
     """
-    analyzes audio using VAD (Voice Activity Detection) and spectral features.
-    Returns:
-    - "speech_detected": Human speech found
+    Analyzes audio using VAD (Voice Activity Detection), ZCR, and RMS to differentiate:
+    - "speech_detected": Human speech (high confidence)
+    - "whisper_suspected": Low volume, unvoiced speech (high ZCR)
     - "loud_noise_detected": High energy but not speech (e.g. slamming door)
     - "suspicious_silence": Audio is completely dead (possible mic mute)
     """
@@ -188,16 +188,18 @@ def analyze_audio(audio_bytes: bytes) -> str:
         # librosa handles bytes via soundfile if we pass a BytesIO
         y, sr = librosa.load(io.BytesIO(audio_bytes), sr=16000)
         
-        # 2. Check for Silence / Mic Mute
+        # 2. Extract Features
         rms = librosa.feature.rms(y=y)[0]
         mean_rms = np.mean(rms)
+        zcr = np.mean(librosa.feature.zero_crossing_rate(y=y))
         
+        # 3. Check for Silence / Mic Mute
         # Very low threshold for "dead air"
         if mean_rms < 0.0001:
             logger.info(f"Suspicious silence: RMS={mean_rms}")
             return "suspicious_silence"
 
-        # 3. VAD Check (Voice Activity Detection)
+        # 4. VAD Check (Voice Activity Detection)
         # Convert float32 to int16
         pcm_data = (y * 32767).astype(np.int16)
         
@@ -219,12 +221,21 @@ def analyze_audio(audio_bytes: bytes) -> str:
         
         speech_ratio = num_speech_frames / total_frames if total_frames > 0 else 0
         
-        if speech_ratio > 0.2:  # If >20% of audio contains speech
+        # PRIMARY DECISION TREE
+        
+        # A. Clear Human Speech
+        if speech_ratio > 0.2:
             logger.info(f"Speech detected: ratio={speech_ratio:.2f}")
             return "speech_detected"
 
-        # 4. Loud Noise Check (if no speech)
-        # If mean RMS is high but VAD says no speech, it's likely noise
+        # B. Whisper Detection
+        # Whispers: No voicing (Low VAD), Low-ish RMS, but High ZCR (lots of 'sss' sounds)
+        if speech_ratio < 0.1 and zcr > 0.05 and mean_rms > 0.002:
+            logger.info(f"Whisper metrics: ZCR={zcr:.2f}, RMS={mean_rms:.4f}")
+            return "whisper_suspected"
+
+        # C. Loud Noise (Non-Speech)
+        # High RMS, Low Speech Ratio
         if mean_rms > 0.05:
             logger.info(f"Loud noise detected: RMS={mean_rms:.4f}")
             return "loud_noise_detected"
