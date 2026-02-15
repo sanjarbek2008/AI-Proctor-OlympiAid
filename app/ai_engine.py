@@ -4,7 +4,7 @@ import io
 import numpy as np
 import scipy.io.wavfile as wav
 import librosa
-import webrtcvad
+import torch
 import cv2
 from ultralytics import YOLO
 import mediapipe as mp
@@ -18,12 +18,19 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 1. Initialize VAD
+# 1. Initialize Silero VAD
 try:
-    vad = webrtcvad.Vad(2)
+    # Use torch.hub to load the pre-trained Silero VAD model
+    # trust_repo=True is often needed for hub loading
+    vad_model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
+                                      model='silero_vad',
+                                      force_reload=False,
+                                      trust_repo=True)
+    (get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) = utils
+    logger.info("Silero VAD model loaded successfully.")
 except Exception as e:
-    logger.warning(f"VAD init failed: {e}")
-    vad = None
+    logger.error(f"Silero VAD init failed: {e}")
+    vad_model = None
 
 # 2. Initialize YOLO
 try:
@@ -177,68 +184,71 @@ def analyze_image(image_bytes: bytes) -> str:
 
 def analyze_audio(audio_bytes: bytes) -> str:
     """
-    Analyzes audio using VAD (Voice Activity Detection), ZCR, and RMS to differentiate:
-    - "speech_detected": Human speech (high confidence)
-    - "whisper_suspected": Low volume, unvoiced speech (high ZCR)
-    - "loud_noise_detected": High energy but not speech (e.g. slamming door)
-    - "suspicious_silence": Audio is completely dead (possible mic mute)
+    Analyzes audio using Silero VAD to differentiate:
+    - "speech_detected": Human speech (high probability)
+    - "whisper_suspected": Possible speech/whisper (medium probability)
+    - "loud_noise_detected": High energy but filtered by VAD (ignored as noise)
+    - "suspicious_silence": Audio is completely dead
     """
     try:
-        # 1. Load audio with librosa (resample to 16kHz for VAD)
-        # librosa handles bytes via soundfile if we pass a BytesIO
+        # 1. Load audio with librosa (resample to 16kHz for Silero VAD)
         y, sr = librosa.load(io.BytesIO(audio_bytes), sr=16000)
         
-        # 2. Extract Features
+        # 2. Check for Silence / Mic Mute (Basic RMS check)
         rms = librosa.feature.rms(y=y)[0]
         mean_rms = np.mean(rms)
-        zcr = np.mean(librosa.feature.zero_crossing_rate(y=y))
         
-        # 3. Check for Silence / Mic Mute
-        # Very low threshold for "dead air"
         if mean_rms < 0.0001:
             logger.info(f"Suspicious silence: RMS={mean_rms}")
             return "suspicious_silence"
 
-        # 4. VAD Check (Voice Activity Detection)
-        # Convert float32 to int16
-        pcm_data = (y * 32767).astype(np.int16)
+        # 3. Prepare audio for Silero VAD
+        # Silero expects a float32 tensor
+        # Librosa loads as float32 numpy array, so just convert to tensor
+        audio_tensor = torch.from_numpy(y)
         
-        # VAD requires 10, 20, or 30ms frames
-        # 16000Hz * 0.03s = 480 samples
-        frame_duration_ms = 30
-        frame_size = int(sr * frame_duration_ms / 1000)
+        # 4. Get Speech Probability
+        # Silero VAD requires chunks of 512 samples for 16kHz
+        chunk_size = 512
+        speech_probs = []
         
-        num_speech_frames = 0
-        total_frames = 0
+        # Iterate over audio in chunks
+        for i in range(0, len(audio_tensor), chunk_size):
+            chunk = audio_tensor[i:i+chunk_size]
+            
+            # If chunk is too small, pad it (or ignore if very small)
+            if len(chunk) < chunk_size:
+                pad_size = chunk_size - len(chunk)
+                chunk = torch.nn.functional.pad(chunk, (0, pad_size))
+            
+            # Add batch dimension: (1, 512)
+            # But vad_model expects (batch, samples) ?? checking docs...
+            # Actually vad_model(x, sr) where x is (N,) or (1, N) 
+            # The error said "Provided number of samples is ... Supported values: 512"
+            # So it expects exactly 512 samples (or multiple of it if it handles it, but error suggests 512)
+            
+            # Let's ensure it is 1D tensor of 512
+            prob = vad_model(chunk, sr).item()
+            speech_probs.append(prob)
         
-        for i in range(0, len(pcm_data), frame_size):
-            frame = pcm_data[i:i+frame_size]
-            if len(frame) == frame_size:
-                total_frames += 1
-                # Convert frame to bytes
-                if vad.is_speech(frame.tobytes(), sr):
-                    num_speech_frames += 1
+        avg_speech_prob = sum(speech_probs) / len(speech_probs) if speech_probs else 0.0
         
-        speech_ratio = num_speech_frames / total_frames if total_frames > 0 else 0
+        logger.info(f"Silero VAD Avg Prob: {avg_speech_prob:.4f}, RMS: {mean_rms:.4f}")
         
-        # PRIMARY DECISION TREE
-        
-        # A. Clear Human Speech
-        if speech_ratio > 0.2:
-            logger.info(f"Speech detected: ratio={speech_ratio:.2f}")
+        # 5. Decision Logic
+        # Adjusted thresholds for average probability
+        if avg_speech_prob > 0.4:  # 0.4 avg is actually quite high for continuous speech
             return "speech_detected"
-
-        # B. Whisper Detection
-        # Whispers: No voicing (Low VAD), Low-ish RMS, but High ZCR (lots of 'sss' sounds)
-        if speech_ratio < 0.1 and zcr > 0.05 and mean_rms > 0.002:
-            logger.info(f"Whisper metrics: ZCR={zcr:.2f}, RMS={mean_rms:.4f}")
-            return "whisper_suspected"
-
-        # C. Loud Noise (Non-Speech)
-        # High RMS, Low Speech Ratio
-        if mean_rms > 0.05:
-            logger.info(f"Loud noise detected: RMS={mean_rms:.4f}")
-            return "loud_noise_detected"
+        
+        elif 0.15 < avg_speech_prob <= 0.4:
+            # Check RMS to ensure it's not just quiet noise
+            if mean_rms > 0.002: 
+                return "whisper_suspected"
+            
+        # If prob <= 0.15, it's considered noise or silence.
+        elif mean_rms > 0.05:
+             logger.info(f"Loud noise detected (not speech): RMS={mean_rms:.4f}, AvgProb={avg_speech_prob:.4f}")
+             return "loud_noise_detected"
 
         return None
 
