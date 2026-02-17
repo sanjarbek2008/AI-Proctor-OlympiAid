@@ -39,8 +39,8 @@ def log_violation(session_id: str, reason: str, file_bytes: bytes, file_ext: str
         public_url = supabase.storage.from_(bucket_name).get_public_url(filename)
 
         # 3. Insert into 'proctoring_media' table
-        # Set dynamic expiration (e.g., 7 days from now)
-        expires_at = (datetime.now() + timedelta(days=7)).isoformat()
+        # Set dynamic expiration (e.g., 2 days from now)
+        expires_at = (datetime.now() + timedelta(days=2)).isoformat()
         
         media_data = {
             "session_id": session_id,

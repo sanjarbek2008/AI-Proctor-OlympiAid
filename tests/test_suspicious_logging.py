@@ -20,12 +20,13 @@ def mock_img_bytes():
 @patch('app.ai_engine.face_landmarker')
 @patch('app.ai_engine.cv2.imdecode')
 @patch('app.ai_engine.cv2.cvtColor')
+@patch('app.ai_engine.mp.Image')
 @patch('app.ai_engine._compute_head_pose')
 @patch('app.ai_engine._compute_gaze_ratio')
 @patch('app.ai_engine._get_tracker')
 def test_suspicious_frame_returned(mock_get_tracker, mock_gaze, mock_pose, 
-                                   mock_cvtColor, mock_imdecode, mock_mp_landmarker, 
-                                   mock_yolo, mock_img_bytes):
+                                   mock_mp_image, mock_mp_cvt_color, mock_imdecode, 
+                                   mock_mp_landmarker, mock_yolo, mock_img_bytes):
     # Setup mocks
     mock_imdecode.return_value = MagicMock()
     mock_yolo.return_value = [MagicMock(boxes=[])] # No YOLO detections
@@ -52,10 +53,8 @@ def test_suspicious_frame_returned(mock_get_tracker, mock_gaze, mock_pose,
     # Run analysis
     result = analyze_image(mock_img_bytes, session_id="test_session")
     
-    # Verify suspicious frame is returned
-    assert result is not None
-    assert result.startswith("suspicious_frame_")
-    assert "head_turned_up" in result
+    # Verify suspicious frame is returned immediately
+    assert result == "head_turned_up"
 
 @patch('app.ai_engine.model')
 @patch('app.ai_engine.face_landmarker')

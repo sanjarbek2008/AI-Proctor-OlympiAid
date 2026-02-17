@@ -434,15 +434,16 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Optional[s
         else:
             logger.debug("Skipping gaze check (user looking down)")
 
-        # ===== PHASE 3: Temporal Smoothing =====
+        # New Logic: Immediate Logging
+        if suspicion_score >= SUSPICION_SCORE_THRESHOLD:
+            # Get the most suspicious signal name to use as the reason
+            reason = max(signals, key=signals.get) if signals else "general_suspicion"
+            logger.info(f"IMMEDIATE VIOLATION: {reason} (Score: {suspicion_score})")
+            return reason
+
+        # Fallback to tracker for long-term patterns if score is low but non-zero
         tracker = _get_tracker(session_id)
-        violation = tracker.add_frame(suspicion_score, signals)
-
-        if violation:
-            logger.info(f"Sustained violation detected for session {session_id}: {violation}")
-            return violation
-
-        return None
+        return tracker.add_frame(suspicion_score, signals)
 
     except Exception as e:
         logger.error(f"Image analysis error: {e}")
