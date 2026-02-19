@@ -6,6 +6,15 @@ from app.database import log_violation
 
 app = FastAPI()
 
+# Enable CORS for frontend integration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins, adjust for production
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allows all headers
+)
+
 
 @app.get("/")
 def health_check():
