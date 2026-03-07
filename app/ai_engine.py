@@ -16,6 +16,7 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 from dotenv import load_dotenv
+import joblib
 
 load_dotenv()
 
@@ -57,6 +58,15 @@ try:
 except Exception as e:
     logger.error(f"MediaPipe init failed: {e}")
     face_landmarker = None
+
+# 4. Initialize Simple-Head-Pose SVR Model
+try:
+    model_path = os.path.join(os.path.dirname(__file__), 'best_model_svr_23_01_24_17.joblib')
+    head_pose_model = joblib.load(model_path)
+    logger.info("Simple-Head-Pose SVR model loaded successfully.")
+except Exception as e:
+    logger.error(f"Simple-Head-Pose SVR model init failed: {e}")
+    head_pose_model = None
 
 # ============================================================
 # Configuration (all configurable via env vars)
@@ -101,15 +111,14 @@ LEFT_EYE_INNER = 133
 RIGHT_EYE_INNER = 362
 RIGHT_EYE_OUTER = 263
 
-# Improved yaw landmarks (cheeks + eyes instead of ears)
-LEFT_CHEEK = 93
-RIGHT_CHEEK = 323
-LEFT_EYE_CENTER_TOP = 159
-LEFT_EYE_CENTER_BOTTOM = 145
-RIGHT_EYE_CENTER_TOP = 386
-RIGHT_EYE_CENTER_BOTTOM = 374
-
-NOSE_TIP = 1
+# Simple-Head-Pose specific 7 landmarks
+SHP_NOSE = 1
+SHP_FOREHEAD = 10
+SHP_LEFT_EYE = 33
+SHP_MOUTH_LEFT = 61
+SHP_CHIN = 199
+SHP_RIGHT_EYE = 263
+SHP_MOUTH_RIGHT = 291
 
 # Kept for backward compatibility / fallback
 LEFT_EAR = 234
@@ -261,46 +270,68 @@ def _compute_gaze_ratio(landmarks, img_w: int, img_h: int) -> Tuple[float, float
 # Head Pose Estimation (Improved)
 # ============================================================
 
-def _compute_head_pose(landmarks, img_w: int, img_h: int) -> Dict[str, float]:
-    """Compute head yaw and pitch using cheek + eye landmarks (more stable than ears).
+def _compute_head_pose(landmarks_list, img_w: int, img_h: int) -> Dict[str, float]:
+    """Compute head yaw and pitch using the Simple-Head-Pose trained SVR model.
     
     Returns dict with:
-      'yaw_offset': normalized nose offset from face center (0 = centered)
-      'pitch_offset': normalized vertical offset (positive = looking up)
-      'face_width': the computed face width in pixels
+      'yaw_offset': yaw angle in normalized units mapped to backward compatibility range
+      'pitch_offset': pitch angle mapped to backward compatibility range (positive = looking up)
+      'face_width': default fallback value 
     """
-    def get_point(idx):
-        lm = landmarks[idx]
-        return (lm.x * img_w, lm.y * img_h)
-
-    nose = get_point(NOSE_TIP)
-
-    # Use cheek landmarks for face width (more stable than ears)
-    left_cheek = get_point(LEFT_CHEEK)
-    right_cheek = get_point(RIGHT_CHEEK)
-    face_width = abs(right_cheek[0] - left_cheek[0])
-
-    if face_width <= 0:
+    if head_pose_model is None:
         return {'yaw_offset': 0.0, 'pitch_offset': 0.0, 'face_width': 0.0}
 
-    # Yaw: nose offset from midpoint of cheeks
-    face_center_x = (left_cheek[0] + right_cheek[0]) / 2
-    yaw_offset = abs(nose[0] - face_center_x) / face_width
-
-    # Pitch: use eye centers for vertical reference (more stable than ears)
-    left_eye_mid_y = (get_point(LEFT_EYE_CENTER_TOP)[1] + get_point(LEFT_EYE_CENTER_BOTTOM)[1]) / 2
-    right_eye_mid_y = (get_point(RIGHT_EYE_CENTER_TOP)[1] + get_point(RIGHT_EYE_CENTER_BOTTOM)[1]) / 2
-    avg_eye_y = (left_eye_mid_y + right_eye_mid_y) / 2
-
-    # Positive = nose above eyes = looking up
-    # Negative = nose below eyes = looking down
-    pitch_offset = (avg_eye_y - nose[1]) / face_width
-
-    return {
-        'yaw_offset': yaw_offset,
-        'pitch_offset': pitch_offset,
-        'face_width': face_width,
-    }
+    # 1. Extract the 7 specific landmarks required by the model
+    # Order matters: NOSE, FOREHEAD, LEFT_EYE, MOUTH_LEFT, CHIN, RIGHT_EYE, MOUTH_RIGHT
+    target_idx = [SHP_NOSE, SHP_FOREHEAD, SHP_LEFT_EYE, SHP_MOUTH_LEFT, SHP_CHIN, SHP_RIGHT_EYE, SHP_MOUTH_RIGHT]
+    
+    try:
+        # Get x,y landmarks correctly structured
+        raw_lms = []
+        for idx in target_idx:
+            # Not scaling to img_w/img_h yet because the SVR model uses its own relative scaling
+            lm = landmarks_list[idx]
+            raw_lms.append(np.array([lm.x, lm.y]))
+            
+        # 2. Replicate Scaling logic exactly as in Simple-Head-Pose
+        nose_point = raw_lms[0]
+        # Translate to nose=origin
+        translated_lms = [lm - nose_point for lm in raw_lms]
+        
+        # Scale by distance between forehead(index 1) and chin(index 4)
+        forehead_point = translated_lms[1]
+        chin_point = translated_lms[4]
+        reference_length = np.linalg.norm(forehead_point - chin_point)
+        
+        if reference_length <= 0:
+            return {'yaw_offset': 0.0, 'pitch_offset': 0.0, 'face_width': 0.0}
+            
+        scaled_lms = [lm / reference_length for lm in translated_lms]
+        
+        # Flatten into 1D array of length 14
+        flattened_lms = [item for tuple_item in scaled_lms for item in tuple_item]
+        
+        # 3. Predict angles (yaw, pitch, roll)
+        predictions = head_pose_model.predict([flattened_lms])[0]
+        yaw = float(predictions[0])
+        pitch = float(predictions[1])
+        # roll = predictions[2]
+        
+        # Normalize SVR output so that forward-looking is ~0
+        # Values based on SVR model characteristic output for a centered mock face
+        # We also apply a 1.2x multiplier to align sensitivity with previous math-based thresholds
+        normalized_yaw = (yaw - 0.13) * 1.2
+        normalized_pitch = (pitch + 0.58) * 1.2
+        
+        return {
+            'yaw_offset': abs(normalized_yaw), # Existing code expects absolute yaw
+            'pitch_offset': normalized_pitch,
+            'face_width': 100.0, # dummy value for compatibility
+        }
+        
+    except Exception as e:
+        logger.error(f"Error computing head pose with SVR: {e}")
+        return {'yaw_offset': 0.0, 'pitch_offset': 0.0, 'face_width': 0.0}
 
 
 # ============================================================

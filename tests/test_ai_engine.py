@@ -34,12 +34,19 @@ def make_landmarks(overrides: dict = None) -> list:
     defaults = {
         # Nose tip
         1: (0.50, 0.55),
+        # Forehead (SHP_FOREHEAD = 10)
+        10: (0.50, 0.25),
         # Left eye outer/inner corners
         33: (0.35, 0.45),
         133: (0.45, 0.45),
         # Right eye inner/outer corners
         362: (0.55, 0.45),
         263: (0.65, 0.45),
+        # Mouth corners (SHP_MOUTH_LEFT = 61, SHP_MOUTH_RIGHT = 291)
+        61: (0.40, 0.75),
+        291: (0.60, 0.75),
+        # Chin (SHP_CHIN = 199)
+        199: (0.50, 0.90),
         # Iris centers (centered in eyes)
         468: (0.40, 0.45),  # left iris centered
         473: (0.60, 0.45),  # right iris centered
