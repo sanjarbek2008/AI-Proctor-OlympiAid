@@ -10,4 +10,5 @@ scipy
 opencv-python
 mediapipe
 librosa
-webrtcvadscikit-learn\njoblib
+scikit-learn
+joblib
