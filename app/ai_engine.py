@@ -92,8 +92,8 @@ GAZE_LEFT_THRESHOLD = float(os.environ.get("GAZE_LEFT_THRESHOLD", "0.35"))
 GAZE_RIGHT_THRESHOLD = float(os.environ.get("GAZE_RIGHT_THRESHOLD", "0.65"))
 
 # Head pose thresholds
-YAW_THRESHOLD = float(os.environ.get("YAW_THRESHOLD", "0.25"))
-PITCH_UP_THRESHOLD = float(os.environ.get("PITCH_UP_THRESHOLD", "0.18"))
+YAW_THRESHOLD = float(os.environ.get("YAW_THRESHOLD", "0.15"))
+PITCH_UP_THRESHOLD = float(os.environ.get("PITCH_UP_THRESHOLD", "0.05"))
 
 # ============================================================
 # MediaPipe FaceMesh Landmark Indices
@@ -477,20 +477,24 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Tuple[Opti
                     cv2.putText(img, "STATUS: LOOKING DOWN", (img_w - 250, 60),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                # Yaw check (head turned sideways)
+                # Yaw check (block sideways)
                 if yaw > YAW_THRESHOLD:
-                    if is_looking_down:
-                        if yaw > (YAW_THRESHOLD * 1.5):
-                            suspicion_score += 0.4
-                            signals['head_turned_sideways_while_down'] = yaw
-                    else:
-                        suspicion_score += 0.4
-                        signals['head_turned_sideways'] = yaw
+                    # Even when looking down, we block sideways
+                    suspicion_score += 0.4
+                    signals['head_turned_sideways'] = yaw
+                    logger.debug(f"Yaw signal: offset={yaw:.2f}")
 
-                # Pitch check (head turned up — not allowed)
+                # Pitch check (block anything that isn't looking down)
                 if pitch > PITCH_UP_THRESHOLD:
+                    # Strictly looking UP
                     suspicion_score += 0.6
                     signals['head_turned_up'] = pitch
+                    logger.debug(f"Pitch up signal: offset={pitch:.2f}")
+                elif pitch > -0.05:
+                    # Neutral/Forward - Blocked because "only allow head to look down"
+                    suspicion_score += 0.4
+                    signals['not_looking_down'] = pitch
+                    logger.debug(f"Not looking down: pitch={pitch:.2f}")
 
                 # 2. Eye Gaze Estimation (skipped if looking down)
                 if not is_looking_down:
