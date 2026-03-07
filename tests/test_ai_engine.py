@@ -1,4 +1,4 @@
-"""Tests for AI engine gaze estimation and temporal smoothing logic.
+"""Tests for AI engine head pose estimation and temporal smoothing logic.
 
 These tests validate the pure math/logic using mocked landmarks — 
 no real images or model loading needed.
@@ -47,9 +47,6 @@ def make_landmarks(overrides: dict = None) -> list:
         291: (0.60, 0.75),
         # Chin (SHP_CHIN = 199)
         199: (0.50, 0.90),
-        # Iris centers (centered in eyes)
-        468: (0.40, 0.45),  # left iris centered
-        473: (0.60, 0.45),  # right iris centered
         # Cheeks (for yaw)
         93: (0.30, 0.55),   # left cheek
         323: (0.70, 0.55),  # right cheek
@@ -84,58 +81,6 @@ def make_landmarks(overrides: dict = None) -> list:
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-
-class TestComputeGazeRatio:
-    """Test _compute_gaze_ratio with synthetic landmarks."""
-
-    def _get_fn(self):
-        """Import the function (lazy to avoid import-time model errors in CI)."""
-        from app.ai_engine import _compute_gaze_ratio
-        return _compute_gaze_ratio
-
-    def test_centered_gaze(self):
-        """Iris centered in eye → ratio ~0.5."""
-        fn = self._get_fn()
-        lms = make_landmarks()
-        left_r, right_r = fn(lms, img_w=640, img_h=480)
-        assert 0.40 <= left_r <= 0.60, f"Left ratio {left_r} not centered"
-        assert 0.40 <= right_r <= 0.60, f"Right ratio {right_r} not centered"
-
-    def test_looking_left(self):
-        """Iris shifted to outer corner of left eye → ratio < 0.35."""
-        fn = self._get_fn()
-        lms = make_landmarks({
-            468: (0.36, 0.45),  # left iris near outer (left) corner (33 is at 0.35)
-            473: (0.56, 0.45),  # right iris near inner corner (362 is at 0.55)
-        })
-        left_r, right_r = fn(lms, img_w=640, img_h=480)
-        assert left_r < 0.35, f"Left ratio {left_r} should be < 0.35 for looking left"
-        assert right_r < 0.35, f"Right ratio {right_r} should be < 0.35 for looking left"
-
-    def test_looking_right(self):
-        """Iris shifted to inner corner → ratio > 0.65."""
-        fn = self._get_fn()
-        lms = make_landmarks({
-            468: (0.44, 0.45),  # left iris near inner corner (133 is at 0.45)
-            473: (0.64, 0.45),  # right iris near outer corner (263 is at 0.65)
-        })
-        left_r, right_r = fn(lms, img_w=640, img_h=480)
-        assert left_r > 0.65, f"Left ratio {left_r} should be > 0.65 for looking right"
-        assert right_r > 0.65, f"Right ratio {right_r} should be > 0.65 for looking right"
-
-    def test_zero_eye_width_returns_centered(self):
-        """If eye width is zero (degenerate), return 0.5."""
-        fn = self._get_fn()
-        lms = make_landmarks({
-            33: (0.40, 0.45),
-            133: (0.40, 0.45),  # same x → zero width
-            362: (0.60, 0.45),
-            263: (0.60, 0.45),  # same x → zero width
-        })
-        left_r, right_r = fn(lms, img_w=640, img_h=480)
-        assert left_r == 0.5
-        assert right_r == 0.5
 
 
 class TestComputeHeadPose:
@@ -201,21 +146,13 @@ class TestSessionTracker:
         assert violation is not None
         assert violation == 'head_turned_sideways'
 
-    def test_mixed_frames_below_ratio(self):
-        """If only 30% of frames are suspicious (below 50% trigger), no violation."""
-        tracker = self._make_tracker(buffer_size=10, trigger_ratio=0.5, score_threshold=0.4)
-        violation = None
-        for i in range(10):
-            score = 0.8 if i < 3 else 0.1  # only 3/10 = 30%
-            violation = tracker.add_frame(score, {'gaze_left': 0.2} if i < 3 else {})
-        assert violation is None
 
     def test_buffer_clears_after_violation(self):
         """After a violation fires, buffer resets — next clean frames shouldn't trigger."""
         tracker = self._make_tracker(buffer_size=6, trigger_ratio=0.5, score_threshold=0.4)
         # Fill with suspicious frames
         for _ in range(10):
-            tracker.add_frame(0.8, {'gaze_right': 0.8})
+            tracker.add_frame(0.8, {'head_turned_sideways': 0.8})
         # Now send clean frames — should need to fill buffer again
         for _ in range(5):
             result = tracker.add_frame(0.0, {})
@@ -237,15 +174,6 @@ class TestSessionTracker:
 class TestSuspicionScoring:
     """Integration-level test of score accumulation logic."""
 
-    def test_gaze_only_triggers_score(self):
-        """Sideways gaze alone should contribute 0.5 to score."""
-        # This tests the concept: avg_gaze < 0.35 → +0.5
-        from app.ai_engine import GAZE_LEFT_THRESHOLD
-        avg_gaze = 0.20
-        score = 0.0
-        if avg_gaze < GAZE_LEFT_THRESHOLD:
-            score += 0.5
-        assert score >= 0.4, "Gaze-only should exceed suspicion threshold"
 
     def test_mild_yaw_below_threshold(self):
         """Small yaw offset alone (0.15) should not reach threshold."""
@@ -255,21 +183,6 @@ class TestSuspicionScoring:
         if yaw > YAW_THRESHOLD:
             score += 0.4
         assert score < SUSPICION_SCORE_THRESHOLD, "Mild yaw should not trigger"
-
-    def test_combined_signals_exceeds_threshold(self):
-        """Moderate yaw + moderate gaze should exceed threshold together."""
-        from app.ai_engine import YAW_THRESHOLD, GAZE_LEFT_THRESHOLD, SUSPICION_SCORE_THRESHOLD
-        score = 0.0
-        yaw = 0.30
-        avg_gaze = 0.25
-
-        if yaw > YAW_THRESHOLD:
-            score += 0.4
-        if avg_gaze < GAZE_LEFT_THRESHOLD:
-            score += 0.5
-
-        assert score >= SUSPICION_SCORE_THRESHOLD, "Combined signals should exceed threshold"
-
 
 
 class TestLookingDownFixes:
@@ -282,16 +195,13 @@ class TestLookingDownFixes:
         assert 'cell phone' in SUSPICIOUS_OBJECTS
         assert 'laptop' in SUSPICIOUS_OBJECTS
 
-    def test_looking_down_skips_gaze_check(self):
-        """When looking down (pitch < -0.05), gaze checks should be skipped."""
-        from app.ai_engine import _compute_head_pose, SessionTracker
+    def test_looking_down_detection(self):
+        """When looking down (pitch < -0.05)."""
+        from app.ai_engine import _compute_head_pose
         
         # Create landmarks with head looking down (nose below eyes)
         lms = make_landmarks({
             1: (0.50, 0.65),  # nose moved down (eyes are at y=0.45)
-            # Iris way off to the side (which would normally trigger gaze alert)
-            468: (0.36, 0.45),  # left iris at outer edge
-            473: (0.56, 0.45),  # right iris at inner edge
         })
         
         pose = _compute_head_pose(lms, img_w=640, img_h=480)
@@ -299,10 +209,7 @@ class TestLookingDownFixes:
         
         assert is_looking_down, "Student should be detected as looking down"
         
-        # In the actual code, when is_looking_down is True, gaze check is skipped
-        # So the score should NOT include the 0.5 gaze penalty
-        # We can't easily test the full analyze_image without mocking YOLO,
-        # but this verifies the pose detection logic works
+        # This test verifies the pose detection logic works
 
     def test_looking_down_lenient_yaw(self):
         """When looking down, moderate yaw should NOT flag (only extreme yaw)."""

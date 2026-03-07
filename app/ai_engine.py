@@ -87,10 +87,6 @@ SESSION_TIMEOUT_SECONDS = int(os.environ.get("SESSION_TIMEOUT_SECONDS", "300")) 
 # Suspicion score thresholds
 SUSPICION_SCORE_THRESHOLD = float(os.environ.get("SUSPICION_SCORE_THRESHOLD", "0.40"))
 
-# Gaze thresholds
-GAZE_LEFT_THRESHOLD = float(os.environ.get("GAZE_LEFT_THRESHOLD", "0.35"))
-GAZE_RIGHT_THRESHOLD = float(os.environ.get("GAZE_RIGHT_THRESHOLD", "0.65"))
-
 # Head pose thresholds
 YAW_THRESHOLD = float(os.environ.get("YAW_THRESHOLD", "0.15"))
 PITCH_UP_THRESHOLD = float(os.environ.get("PITCH_UP_THRESHOLD", "0.05"))
@@ -98,18 +94,6 @@ PITCH_UP_THRESHOLD = float(os.environ.get("PITCH_UP_THRESHOLD", "0.05"))
 # ============================================================
 # MediaPipe FaceMesh Landmark Indices
 # ============================================================
-
-# Iris centers
-LEFT_IRIS_CENTER = 468
-RIGHT_IRIS_CENTER = 473
-
-# Eye corners (for gaze ratio)
-# Left eye: outer=33, inner=133
-LEFT_EYE_OUTER = 33
-LEFT_EYE_INNER = 133
-# Right eye: inner=362, outer=263
-RIGHT_EYE_INNER = 362
-RIGHT_EYE_OUTER = 263
 
 # Simple-Head-Pose specific 7 landmarks
 SHP_NOSE = 1
@@ -224,49 +208,6 @@ def _get_tracker(session_id: str) -> SessionTracker:
 
 
 # ============================================================
-# Eye Gaze Estimation
-# ============================================================
-
-def _compute_gaze_ratio(landmarks, img_w: int, img_h: int) -> Tuple[float, float]:
-    """Compute horizontal gaze ratio for both eyes using iris + corner landmarks.
-    
-    Returns (left_eye_ratio, right_eye_ratio) each in [0, 1].
-      < 0.35 → looking left
-      > 0.65 → looking right
-      0.35–0.65 → centered
-      
-    The ratio is scale-invariant: iris_x position relative to eye width,
-    so it works regardless of camera distance or resolution.
-    """
-    def get_x(idx):
-        return landmarks[idx].x * img_w
-
-    # LEFT EYE: outer corner (33) to inner corner (133)
-    left_outer_x = get_x(LEFT_EYE_OUTER)
-    left_inner_x = get_x(LEFT_EYE_INNER)
-    left_iris_x = get_x(LEFT_IRIS_CENTER)
-
-    left_eye_width = abs(left_inner_x - left_outer_x)
-    if left_eye_width > 0:
-        left_ratio = (left_iris_x - left_outer_x) / left_eye_width
-    else:
-        left_ratio = 0.5  # default centered
-
-    # RIGHT EYE: inner corner (362) to outer corner (263)
-    right_inner_x = get_x(RIGHT_EYE_INNER)
-    right_outer_x = get_x(RIGHT_EYE_OUTER)
-    right_iris_x = get_x(RIGHT_IRIS_CENTER)
-
-    right_eye_width = abs(right_outer_x - right_inner_x)
-    if right_eye_width > 0:
-        right_ratio = (right_iris_x - right_inner_x) / right_eye_width
-    else:
-        right_ratio = 0.5  # default centered
-
-    return (left_ratio, right_ratio)
-
-
-# ============================================================
 # Head Pose Estimation (Improved)
 # ============================================================
 
@@ -378,7 +319,7 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Tuple[Opti
     
     Uses a multi-signal suspicion scoring system with temporal smoothing.
     YOLO detections (multiple people, forbidden objects) still return immediately.
-    Face/gaze analysis feeds into a per-session rolling buffer.
+    Face analysis feeds into a per-session rolling buffer.
     """
     def get_encoded(image):
         _, buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
@@ -445,7 +386,7 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Tuple[Opti
             # Use the first face for detailed pose analysis
             landmarks = face_results.face_landmarks[0]
             
-            # --- Single face analysis with SVR Head Pose + Gaze ---
+            # --- Single face analysis with SVR Head Pose ---
             suspicion_score = 0.0
             signals: Dict[str, float] = {}
 
@@ -496,21 +437,6 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Tuple[Opti
                     signals['not_looking_down'] = pitch
                     logger.debug(f"Not looking down: pitch={pitch:.2f}")
 
-                # 2. Eye Gaze Estimation (skipped if looking down)
-                if not is_looking_down:
-                    left_ratio, right_ratio = _compute_gaze_ratio(landmarks, img_w, img_h)
-                    avg_gaze = (left_ratio + right_ratio) / 2
-
-                    if avg_gaze < GAZE_LEFT_THRESHOLD:
-                        suspicion_score += 0.5
-                        signals['gaze_left'] = avg_gaze
-                        cv2.putText(img, f"GAZE LEFT: {avg_gaze:.2f}", (10, img_h - 20),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                    elif avg_gaze > GAZE_RIGHT_THRESHOLD:
-                        suspicion_score += 0.5
-                        signals['gaze_right'] = avg_gaze
-                        cv2.putText(img, f"GAZE RIGHT: {avg_gaze:.2f}", (10, img_h - 20),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
                 # Final suspect check for this frame
                 if suspicion_score >= SUSPICION_SCORE_THRESHOLD:

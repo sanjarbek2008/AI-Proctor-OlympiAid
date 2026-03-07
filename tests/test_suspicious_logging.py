@@ -21,7 +21,6 @@ def mock_img_bytes():
 @patch('app.ai_engine.cv2.cvtColor')
 @patch('app.ai_engine.mp.Image')
 @patch('app.ai_engine._compute_head_pose')
-@patch('app.ai_engine._compute_gaze_ratio')
 @patch('app.ai_engine._get_tracker')
 @patch('app.ai_engine.cv2.imencode')
 @patch('app.ai_engine.cv2.rectangle')
@@ -29,9 +28,9 @@ def mock_img_bytes():
 @patch('app.ai_engine.cv2.circle')
 @patch('app.ai_engine.cv2.line')
 @patch('app.ai_engine._draw_head_pose_axes')
-def test_suspicious_frame_returned(mock_draw_axes, mock_line, mock_circle, mock_put_text, 
-                                   mock_rectangle, mock_imencode, mock_get_tracker, 
-                                   mock_gaze, mock_pose, mock_mp_image, mock_mp_cvt_color, 
+def test_suspicious_frame_returned(mock_draw_axes, mock_line, mock_circle, mock_put_text,
+                                   mock_rectangle, mock_imencode, mock_get_tracker,
+                                   mock_pose, mock_mp_image, mock_mp_cvt_color,
                                    mock_imdecode, mock_mp_landmarker, mock_yolo, mock_img_bytes):
     # Setup mocks
     mock_imencode.return_value = (True, MagicMock(tobytes=lambda: b"fake_encoded_img"))
@@ -53,9 +52,6 @@ def test_suspicious_frame_returned(mock_draw_axes, mock_line, mock_circle, mock_
         'raw_roll': 0.0
     }
     
-    # Gaze: centered
-    mock_gaze.return_value = (0.5, 0.5)
-    
     # Tracker: No sustained violation
     mock_tracker = MagicMock()
     mock_tracker.add_frame.return_value = None
@@ -73,7 +69,6 @@ def test_suspicious_frame_returned(mock_draw_axes, mock_line, mock_circle, mock_
 @patch('app.ai_engine.cv2.cvtColor')
 @patch('app.ai_engine.mp.Image')
 @patch('app.ai_engine._compute_head_pose')
-@patch('app.ai_engine._compute_gaze_ratio')
 @patch('app.ai_engine._get_tracker')
 @patch('app.ai_engine.cv2.imencode')
 @patch('app.ai_engine.cv2.rectangle')
@@ -81,9 +76,9 @@ def test_suspicious_frame_returned(mock_draw_axes, mock_line, mock_circle, mock_
 @patch('app.ai_engine.cv2.circle')
 @patch('app.ai_engine.cv2.line')
 @patch('app.ai_engine._draw_head_pose_axes')
-def test_yolo_return_priority(mock_draw_axes, mock_line, mock_circle, mock_put_text, 
-                               mock_rectangle, mock_imencode, mock_get_tracker, 
-                               mock_gaze, mock_pose, mock_mp_image, mock_mp_cvt_color, 
+def test_yolo_return_priority(mock_draw_axes, mock_line, mock_circle, mock_put_text,
+                               mock_rectangle, mock_imencode, mock_get_tracker,
+                               mock_pose, mock_mp_image, mock_mp_cvt_color,
                                mock_imdecode, mock_mp_landmarker, mock_yolo, mock_img_bytes):
     # Setup mocks
     mock_imencode.return_value = (True, MagicMock(tobytes=lambda: b"fake_encoded_img"))
