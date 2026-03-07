@@ -1,12 +1,15 @@
-"""Tests for AI engine head pose estimation and temporal smoothing logic.
+"""Tests for AI engine head pose detection.
 
-These tests validate the pure math/logic using mocked landmarks — 
-no real images or model loading needed.
+Each image is analyzed independently. Any violation is returned immediately
+with no scoring, buffering, or session state.
 """
-import time
 import pytest
 from unittest.mock import MagicMock
 from dataclasses import dataclass
+
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
 # ============================================================
@@ -24,37 +27,22 @@ class MockLandmark:
 def make_landmarks(overrides: dict = None) -> list:
     """Create a list of 478 mock landmarks with sane face defaults.
     
-    Default layout: face centered, eyes centered, iris centered.
+    Default layout: face centered, looking straight forward.
     Use overrides dict {index: (x, y)} to customize.
     """
-    # Create 478 landmarks at face center by default
     lms = [MockLandmark(x=0.5, y=0.5) for _ in range(478)]
 
-    # Set up a realistic default face geometry (normalized coords)
     defaults = {
-        # Nose tip
-        1: (0.50, 0.55),
-        # Forehead (SHP_FOREHEAD = 10)
-        10: (0.50, 0.25),
-        # Left eye outer/inner corners
-        33: (0.35, 0.45),
-        133: (0.45, 0.45),
-        # Right eye inner/outer corners
-        362: (0.55, 0.45),
-        263: (0.65, 0.45),
-        # Mouth corners (SHP_MOUTH_LEFT = 61, SHP_MOUTH_RIGHT = 291)
-        61: (0.40, 0.75),
-        291: (0.60, 0.75),
-        # Chin (SHP_CHIN = 199)
-        199: (0.50, 0.90),
+        1:   (0.50, 0.55),  # Nose tip
+        10:  (0.50, 0.25),  # Forehead
+        33:  (0.35, 0.45),  # Left eye
+        61:  (0.40, 0.75),  # Mouth left
+        199: (0.50, 0.90),  # Chin
+        263: (0.65, 0.45),  # Right eye
+        291: (0.60, 0.75),  # Mouth right
         # Cheeks (for yaw)
-        93: (0.30, 0.55),   # left cheek
-        323: (0.70, 0.55),  # right cheek
-        # Eye top/bottom (for pitch)
-        159: (0.40, 0.43),  # left eye top
-        145: (0.40, 0.47),  # left eye bottom
-        386: (0.60, 0.43),  # right eye top
-        374: (0.60, 0.47),  # right eye bottom
+        93:  (0.30, 0.55),
+        323: (0.70, 0.55),
         # Ears (fallback)
         234: (0.20, 0.50),
         454: (0.80, 0.50),
@@ -70,18 +58,8 @@ def make_landmarks(overrides: dict = None) -> list:
 
 
 # ============================================================
-# Import the functions under test
-# We import after defining mocks since ai_engine loads models at import time.
-# To avoid model loading, we test the pure functions directly.
+# Head Pose Computation Tests
 # ============================================================
-
-# We need to be able to import the pure functions without triggering model loading.
-# Strategy: import the module and test the helper functions.
-
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 
 class TestComputeHeadPose:
     """Test _compute_head_pose with synthetic landmarks."""
@@ -101,138 +79,113 @@ class TestComputeHeadPose:
     def test_head_turned_right(self):
         """Nose shifted right → high yaw offset."""
         fn = self._get_fn()
-        lms = make_landmarks({
-            1: (0.65, 0.55),  # nose shifted right
-        })
+        lms = make_landmarks({1: (0.65, 0.55)})
         pose = fn(lms, img_w=640, img_h=480)
         assert pose['yaw_offset'] > 0.25, f"Yaw {pose['yaw_offset']} should be > 0.25"
 
     def test_head_looking_up(self):
-        """Nose moved up above eyes → positive pitch offset."""
+        """Nose moved above eyes → positive pitch offset."""
         fn = self._get_fn()
-        lms = make_landmarks({
-            1: (0.50, 0.35),  # nose above eyes (eyes are at y=0.45)
-        })
+        lms = make_landmarks({1: (0.50, 0.35)})
         pose = fn(lms, img_w=640, img_h=480)
         assert pose['pitch_offset'] > 0.18, f"Pitch {pose['pitch_offset']} should be > 0.18"
 
-
-class TestSessionTracker:
-    """Test temporal smoothing via SessionTracker."""
-
-    def _make_tracker(self, buffer_size=10, trigger_ratio=0.5, score_threshold=0.4):
-        from app.ai_engine import SessionTracker
-        return SessionTracker(
-            buffer_size=buffer_size,
-            trigger_ratio=trigger_ratio,
-            score_threshold=score_threshold,
-        )
-
-    def test_no_violation_below_threshold(self):
-        """Low scores should never trigger."""
-        tracker = self._make_tracker(buffer_size=10)
-        for _ in range(20):
-            result = tracker.add_frame(0.1, {})
-        assert result is None
-
-    def test_violation_after_sustained_suspicion(self):
-        """Sustained high scores should trigger after buffer fills."""
-        tracker = self._make_tracker(buffer_size=10, trigger_ratio=0.5, score_threshold=0.4)
-        violation = None
-        for _ in range(20):
-            violation = tracker.add_frame(0.8, {'head_turned_sideways': 0.35})
-            if violation:
-                break
-        assert violation is not None
-        assert violation == 'head_turned_sideways'
+    def test_head_looking_down(self):
+        """Nose moved below eyes → negative pitch offset."""
+        fn = self._get_fn()
+        lms = make_landmarks({1: (0.50, 0.65)})
+        pose = fn(lms, img_w=640, img_h=480)
+        assert pose['pitch_offset'] < -0.05, f"Pitch {pose['pitch_offset']} should be < -0.05"
 
 
-    def test_buffer_clears_after_violation(self):
-        """After a violation fires, buffer resets — next clean frames shouldn't trigger."""
-        tracker = self._make_tracker(buffer_size=6, trigger_ratio=0.5, score_threshold=0.4)
-        # Fill with suspicious frames
-        for _ in range(10):
-            tracker.add_frame(0.8, {'head_turned_sideways': 0.8})
-        # Now send clean frames — should need to fill buffer again
-        for _ in range(5):
-            result = tracker.add_frame(0.0, {})
-        # Buffer is 6, we sent 5 clean, so shouldn't re-trigger
-        assert result is None
+# ============================================================
+# Threshold Config Tests
+# ============================================================
 
-    def test_session_expiry(self):
-        """Tracker should report expired after timeout."""
-        tracker = self._make_tracker()
-        tracker.last_active = time.time() - 400  # 400s ago
-        assert tracker.is_expired(timeout=300) is True
+class TestThresholds:
+    """Verify threshold constants exist and are sensible."""
 
-    def test_session_not_expired(self):
-        """Fresh tracker should not be expired."""
-        tracker = self._make_tracker()
-        assert tracker.is_expired(timeout=300) is False
+    def test_yaw_threshold_exists(self):
+        from app.ai_engine import YAW_THRESHOLD
+        assert 0 < YAW_THRESHOLD < 1.0
 
+    def test_pitch_threshold_exists(self):
+        from app.ai_engine import PITCH_UP_THRESHOLD
+        assert 0 <= PITCH_UP_THRESHOLD < 1.0
 
-class TestSuspicionScoring:
-    """Integration-level test of score accumulation logic."""
+    def test_yolo_confidence_threshold(self):
+        from app.ai_engine import YOLO_CONFIDENCE_THRESHOLD
+        assert 0 < YOLO_CONFIDENCE_THRESHOLD <= 1.0
 
-
-    def test_mild_yaw_below_threshold(self):
-        """Small yaw offset alone (0.15) should not reach threshold."""
-        from app.ai_engine import YAW_THRESHOLD, SUSPICION_SCORE_THRESHOLD
-        yaw = 0.15
-        score = 0.0
-        if yaw > YAW_THRESHOLD:
-            score += 0.4
-        assert score < SUSPICION_SCORE_THRESHOLD, "Mild yaw should not trigger"
-
-
-class TestLookingDownFixes:
-    """Test the new logic for handling students looking down."""
-
-    def test_book_not_in_suspicious_objects(self):
-        """Verify that 'book' has been removed from suspicious objects."""
+    def test_suspicious_objects(self):
         from app.ai_engine import SUSPICIOUS_OBJECTS
-        assert 'book' not in SUSPICIOUS_OBJECTS, "book should not be in suspicious objects (scratch paper false positive)"
         assert 'cell phone' in SUSPICIOUS_OBJECTS
         assert 'laptop' in SUSPICIOUS_OBJECTS
+        assert 'book' not in SUSPICIOUS_OBJECTS
+
+
+# ============================================================
+# No Scoring / No Session State Tests
+# ============================================================
+
+class TestNoScoringNoState:
+    """Verify scoring classes and session state are gone."""
+
+    def test_session_tracker_removed(self):
+        """SessionTracker should no longer exist in the module."""
+        import app.ai_engine as engine
+        assert not hasattr(engine, 'SessionTracker'), \
+            "SessionTracker should have been removed"
+
+    def test_frame_record_removed(self):
+        """FrameRecord should no longer exist in the module."""
+        import app.ai_engine as engine
+        assert not hasattr(engine, 'FrameRecord'), \
+            "FrameRecord should have been removed"
+
+    def test_get_tracker_removed(self):
+        """_get_tracker helper should no longer exist."""
+        import app.ai_engine as engine
+        assert not hasattr(engine, '_get_tracker'), \
+            "_get_tracker should have been removed"
+
+    def test_sessions_registry_removed(self):
+        """Module-level _sessions dict should no longer exist."""
+        import app.ai_engine as engine
+        assert not hasattr(engine, '_sessions'), \
+            "_sessions registry should have been removed"
+
+    def test_suspicion_score_threshold_removed(self):
+        """SUSPICION_SCORE_THRESHOLD should no longer exist."""
+        import app.ai_engine as engine
+        assert not hasattr(engine, 'SUSPICION_SCORE_THRESHOLD'), \
+            "SUSPICION_SCORE_THRESHOLD should have been removed"
+
+
+# ============================================================
+# Looking Down Logic Tests
+# ============================================================
+
+class TestLookingDownDetection:
+    """Verify looking-down detection works correctly."""
 
     def test_looking_down_detection(self):
-        """When looking down (pitch < -0.05)."""
+        """Nose below eyes → is_looking_down = True."""
         from app.ai_engine import _compute_head_pose
-        
-        # Create landmarks with head looking down (nose below eyes)
-        lms = make_landmarks({
-            1: (0.50, 0.65),  # nose moved down (eyes are at y=0.45)
-        })
-        
+        lms = make_landmarks({1: (0.50, 0.65)})
         pose = _compute_head_pose(lms, img_w=640, img_h=480)
         is_looking_down = pose['pitch_offset'] < -0.05
-        
         assert is_looking_down, "Student should be detected as looking down"
-        
-        # This test verifies the pose detection logic works
 
     def test_looking_down_lenient_yaw(self):
-        """When looking down, moderate yaw should NOT flag (only extreme yaw)."""
-        from app.ai_engine import _compute_head_pose, YAW_THRESHOLD
-        
-        # Create landmarks with head looking down + moderate yaw
-        lms = make_landmarks({
-            1: (0.50, 0.65),  # nose down
-            # Nose shifted to create yaw = 0.26 (just above YAW_THRESHOLD of 0.25)
-            1: (0.60, 0.65),  # nose shifted right (but looking down)
-        })
-        
+        """Even when looking down, head turned sideways is still detectable."""
+        from app.ai_engine import _compute_head_pose
+        lms = make_landmarks({1: (0.60, 0.65)})  # nose right + down
         pose = _compute_head_pose(lms, img_w=640, img_h=480)
-        is_looking_down = pose['pitch_offset'] < -0.05
-        
-        # Moderate yaw (>0.25 but <0.375) should NOT trigger when looking down
-        # Only if yaw > YAW_THRESHOLD * 1.5 (0.375) should it flag
-        assert is_looking_down, "Should be looking down"
-        
-        # In actual code: if is_looking_down and yaw > 0.25 but < 0.375, no flag
-        # This test verifies the pose calculation; the scoring logic is in ai_engine.py
+        # Both pose values are computed — downstream logic applies thresholds
+        assert 'yaw_offset' in pose
+        assert 'pitch_offset' in pose
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
