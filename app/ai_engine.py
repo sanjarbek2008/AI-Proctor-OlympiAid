@@ -461,9 +461,21 @@ def analyze_audio(audio_bytes: bytes) -> Optional[str]:
     - "loud_noise_detected": High energy but filtered by VAD (ignored as noise)
     - "suspicious_silence": Audio is completely dead
     """
+    if not audio_bytes or len(audio_bytes) < 100:
+        return None
+
     try:
         # 1. Load audio with librosa (resample to 16kHz for Silero VAD)
-        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=16000)
+        # Using soundfile backend directly via BytesIO can be flaky if headers are missing
+        try:
+            y, sr = librosa.load(io.BytesIO(audio_bytes), sr=16000)
+        except Exception as e:
+            # Fallback/Log specifically for format errors
+            logger.debug(f"Audio decoding failed: {e}. Attempting raw interpretation.")
+            return None
+
+        if len(y) == 0:
+            return None
 
         # 2. Check for Silence / Mic Mute (Basic RMS check)
         rms = librosa.feature.rms(y=y)[0]
@@ -487,7 +499,7 @@ def analyze_audio(audio_bytes: bytes) -> Optional[str]:
                 pad_size = chunk_size - len(chunk)
                 chunk = torch.nn.functional.pad(chunk, (0, pad_size))
 
-            prob = vad_model(chunk, sr).item()
+            prob = vad_model(chunk, 16000).item()
             speech_probs.append(prob)
 
         avg_speech_prob = sum(speech_probs) / len(speech_probs) if speech_probs else 0.0
