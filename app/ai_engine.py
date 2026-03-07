@@ -363,9 +363,9 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Optional[s
             # MediaPipe lost the face. Check YOLO results.
             if person_count >= 1:
                 # YOLO sees a person, but MediaPipe doesn't.
-                # In a math exam context, this 95% means they are looking down writing.
-                logger.info("Person detected but face hidden. Assuming writing posture.")
-                return None  # SAFE — they're just looking down
+                # The face must always be visible, even if the person is looking down.
+                logger.info("Person detected but face is invisible. Warning issued.")
+                return "face_not_visible"
             else:
                 # YOLO sees no one, MediaPipe sees no one.
                 return "user_absent_from_chair"

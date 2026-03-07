@@ -29,6 +29,7 @@ def test_suspicious_frame_returned(mock_get_tracker, mock_gaze, mock_pose,
                                    mock_mp_landmarker, mock_yolo, mock_img_bytes):
     # Setup mocks
     mock_imdecode.return_value = MagicMock()
+    mock_imdecode.return_value.shape = (480, 640, 3)
     mock_yolo.return_value = [MagicMock(boxes=[])] # No YOLO detections
     
     # MediaPipe results
