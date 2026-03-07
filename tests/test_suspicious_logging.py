@@ -1,4 +1,3 @@
-
 import sys
 import os
 import pytest
@@ -24,23 +23,34 @@ def mock_img_bytes():
 @patch('app.ai_engine._compute_head_pose')
 @patch('app.ai_engine._compute_gaze_ratio')
 @patch('app.ai_engine._get_tracker')
-def test_suspicious_frame_returned(mock_get_tracker, mock_gaze, mock_pose, 
-                                   mock_mp_image, mock_mp_cvt_color, mock_imdecode, 
-                                   mock_mp_landmarker, mock_yolo, mock_img_bytes):
+@patch('app.ai_engine.cv2.imencode')
+@patch('app.ai_engine.cv2.rectangle')
+@patch('app.ai_engine.cv2.putText')
+@patch('app.ai_engine.cv2.circle')
+@patch('app.ai_engine.cv2.line')
+@patch('app.ai_engine._draw_head_pose_axes')
+def test_suspicious_frame_returned(mock_draw_axes, mock_line, mock_circle, mock_put_text, 
+                                   mock_rectangle, mock_imencode, mock_get_tracker, 
+                                   mock_gaze, mock_pose, mock_mp_image, mock_mp_cvt_color, 
+                                   mock_imdecode, mock_mp_landmarker, mock_yolo, mock_img_bytes):
     # Setup mocks
+    mock_imencode.return_value = (True, MagicMock(tobytes=lambda: b"fake_encoded_img"))
     mock_imdecode.return_value = MagicMock()
     mock_imdecode.return_value.shape = (480, 640, 3)
     mock_yolo.return_value = [MagicMock(boxes=[])] # No YOLO detections
     
     # MediaPipe results
-    mock_face_landmarks = [MagicMock()]
-    mock_mp_landmarker.detect.return_value = MagicMock(face_landmarks=mock_face_landmarks)
+    mock_face_landmarks = [MagicMock() for _ in range(478)]
+    mock_mp_landmarker.detect.return_value = MagicMock(face_landmarks=[mock_face_landmarks])
     
     # Head Pose: Looking up (Pitch 0.3) -> Score 0.6
     mock_pose.return_value = {
         'yaw_offset': 0.0,
         'pitch_offset': 0.3,
-        'face_width': 100
+        'face_width': 100,
+        'raw_yaw': 0.0,
+        'raw_pitch': 0.3,
+        'raw_roll': 0.0
     }
     
     # Gaze: centered
@@ -52,7 +62,7 @@ def test_suspicious_frame_returned(mock_get_tracker, mock_gaze, mock_pose,
     mock_get_tracker.return_value = mock_tracker
     
     # Run analysis
-    result = analyze_image(mock_img_bytes, session_id="test_session")
+    result, _ = analyze_image(mock_img_bytes, session_id="test_session")
     
     # Verify suspicious frame is returned immediately
     assert result == "head_turned_up"
@@ -60,21 +70,39 @@ def test_suspicious_frame_returned(mock_get_tracker, mock_gaze, mock_pose,
 @patch('app.ai_engine.model')
 @patch('app.ai_engine.face_landmarker')
 @patch('app.ai_engine.cv2.imdecode')
+@patch('app.ai_engine.cv2.cvtColor')
+@patch('app.ai_engine.mp.Image')
+@patch('app.ai_engine._compute_head_pose')
+@patch('app.ai_engine._compute_gaze_ratio')
 @patch('app.ai_engine._get_tracker')
-def test_yolo_return_priority(mock_get_tracker, mock_imdecode, mock_mp_landmarker, 
-                               mock_yolo, mock_img_bytes):
+@patch('app.ai_engine.cv2.imencode')
+@patch('app.ai_engine.cv2.rectangle')
+@patch('app.ai_engine.cv2.putText')
+@patch('app.ai_engine.cv2.circle')
+@patch('app.ai_engine.cv2.line')
+@patch('app.ai_engine._draw_head_pose_axes')
+def test_yolo_return_priority(mock_draw_axes, mock_line, mock_circle, mock_put_text, 
+                               mock_rectangle, mock_imencode, mock_get_tracker, 
+                               mock_gaze, mock_pose, mock_mp_image, mock_mp_cvt_color, 
+                               mock_imdecode, mock_mp_landmarker, mock_yolo, mock_img_bytes):
     # Setup mocks
+    mock_imencode.return_value = (True, MagicMock(tobytes=lambda: b"fake_encoded_img"))
     mock_imdecode.return_value = MagicMock()
+    mock_imdecode.return_value.shape = (480, 640, 3)
     
     # YOLO detects a phone
     mock_box = MagicMock()
     mock_box.conf = [0.9]
     mock_box.cls = [0]
+    mock_box.xyxy = [[10, 10, 50, 50]] # Mock coordinates
     mock_yolo.return_value = [MagicMock(boxes=[mock_box])]
     mock_yolo.names = {0: 'cell phone'}
     
-    # Run analysis
-    result = analyze_image(mock_img_bytes, session_id="test_session")
+    # MediaPipe: No face
+    mock_mp_landmarker.detect.return_value = MagicMock(face_landmarks=[])
     
-    # Verify YOLO flag is returned immediately
+    # Run analysis
+    result, _ = analyze_image(mock_img_bytes, session_id="test_session")
+    
+    # Verify YOLO flag is returned
     assert result == "forbidden_object_cell_phone"

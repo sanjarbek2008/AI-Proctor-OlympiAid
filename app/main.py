@@ -36,11 +36,11 @@ async def analyze_session(
     # 1. Image Analysis
     if image:
         img_bytes = await image.read()
-        visual_flag = analyze_image(img_bytes, session_id=session_id)
+        visual_flag, processed_img = analyze_image(img_bytes, session_id=session_id)
         if visual_flag:
             flags.append(visual_flag)
-            # Send database work to background task
-            background_tasks.add_task(log_violation, session_id, visual_flag, img_bytes, "jpg")
+            # Send database work to background task (using annotated image)
+            background_tasks.add_task(log_violation, session_id, visual_flag, processed_img, "jpg")
 
     # 2. Audio Analysis
     if audio:

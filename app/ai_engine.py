@@ -327,26 +327,63 @@ def _compute_head_pose(landmarks_list, img_w: int, img_h: int) -> Dict[str, floa
             'yaw_offset': abs(normalized_yaw), # Existing code expects absolute yaw
             'pitch_offset': normalized_pitch,
             'face_width': 100.0, # dummy value for compatibility
+            'raw_yaw': yaw,
+            'raw_pitch': pitch,
+            'raw_roll': float(predictions[2]) if len(predictions) > 2 else 0.0
         }
         
     except Exception as e:
         logger.error(f"Error computing head pose with SVR: {e}")
         return {'yaw_offset': 0.0, 'pitch_offset': 0.0, 'face_width': 0.0}
 
+def _draw_head_pose_axes(img, yaw, pitch, roll, tdx, tdy, size=50):
+    """Draw 3D axes at (tdx, tdy) based on yaw, pitch, roll."""
+    try:
+        # Replicate Rodrigues-based axis rotation from Simple-Head-Pose drawer.py
+        # Simple-Head-Pose uses: yaw = -yaw for flipped axis logic
+        rotation_matrix = cv2.Rodrigues(np.array([pitch, -yaw, roll], dtype=np.float64))[0]
+        
+        # Identity matrix for X, Y, Z axes
+        axes_points = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0]
+        ], dtype=np.float64)
+        
+        # Rotate axes
+        axes_points = rotation_matrix @ axes_points
+        # Scale
+        axes_points = (axes_points[:2, :] * size).astype(int)
+        
+        # Translate to nose point
+        axes_points[0, :] += int(tdx)
+        axes_points[1, :] += int(tdy)
+        
+        # Draw lines: X (Blue), Y (Green), Z (Red)
+        # Point 3 is the origin (last col of identity matrix was 0,0,0)
+        origin = (axes_points[0, 3], axes_points[1, 3])
+        cv2.line(img, origin, (axes_points[0, 0], axes_points[1, 0]), (255, 0, 0), 3) # X - Blue
+        cv2.line(img, origin, (axes_points[0, 1], axes_points[1, 1]), (0, 255, 0), 3) # Y - Green
+        cv2.line(img, origin, (axes_points[0, 2], axes_points[1, 2]), (0, 0, 255), 3) # Z - Red
+    except Exception as e:
+        logger.debug(f"Axis drawing failed: {e}")
+
 
 # ============================================================
 # Main Image Analysis
 # ============================================================
 
-def analyze_image(image_bytes: bytes, session_id: str = "default") -> Optional[str]:
-    """Analyzes an image for proctoring violations.
+def analyze_image(image_bytes: bytes, session_id: str = "default") -> Tuple[Optional[str], bytes]:
+    """Analyzes an image for proctoring violations and returns (reason, annotated_image_bytes).
     
     Uses a multi-signal suspicion scoring system with temporal smoothing.
     YOLO detections (multiple people, forbidden objects) still return immediately.
     Face/gaze analysis feeds into a per-session rolling buffer.
-    
-    Returns a reason string if suspicious, else None.
     """
+    def get_encoded(image):
+        _, buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        return buffer.tobytes()
+
     try:
         # Convert bytes to OpenCV Image
         nparr = np.frombuffer(image_bytes, np.uint8)
@@ -354,9 +391,10 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Optional[s
 
         if img is None:
             logger.error("Failed to decode image")
-            return "image_decode_error"
+            return "image_decode_error", image_bytes
 
-        # ===== PHASE 1: YOLO Detection (Immediate Returns) =====
+
+        # ===== PHASE 1: YOLO Detection =====
         results = model(img, verbose=False)
         detections = results[0].boxes
 
@@ -364,6 +402,7 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Optional[s
         suspicious_objects = []
 
         for box in detections:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
             conf = float(box.conf[0])
             if conf < YOLO_CONFIDENCE_THRESHOLD:
                 continue
@@ -371,114 +410,149 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Optional[s
             cls_id = int(box.cls[0])
             label = model.names[cls_id]
 
+            # Draw YOLO boxes for transparency
+            color = (0, 255, 0) # Green default
             if label == 'person':
                 person_count += 1
             elif label in SUSPICIOUS_OBJECTS:
                 suspicious_objects.append(label)
+                color = (0, 0, 255) # Red for suspicious
+            
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(img, f"{label} {conf:.2f}", (x1, y1 - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-        if person_count > 1:
-            logger.info(f"Multiple people detected: {person_count}")
-            return "multiple_people_detected"
-
-        if suspicious_objects:
-            logger.info(f"Suspicious object detected: {suspicious_objects[0]}")
-            return f"forbidden_object_{suspicious_objects[0].replace(' ', '_')}"
 
         # ===== PHASE 2: MediaPipe Face Analysis (Scored + Smoothed) =====
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-
         face_results = face_landmarker.detect(mp_image)
-
-        if not face_results.face_landmarks:
-            # MediaPipe lost the face. Check YOLO results.
-            if person_count >= 1:
-                # YOLO sees a person, but MediaPipe doesn't.
-                # The face must always be visible, even if the person is looking down.
-                logger.info("Person detected but face is invisible. Warning issued.")
-                return "face_not_visible"
-            else:
-                # YOLO sees no one, MediaPipe sees no one.
-                return "user_absent_from_chair"
-
-        num_faces = len(face_results.face_landmarks)
-        if num_faces > 1:
-            logger.info(f"Multiple faces detected: {num_faces}")
-            return "multiple_faces_detected"
-
-        # --- Single face analysis with suspicion scoring ---
-        landmarks = face_results.face_landmarks[0]
         img_h, img_w = img.shape[:2]
 
-        suspicion_score = 0.0
-        signals: Dict[str, float] = {}
+        face_reason = None
+        face_detected = False
+        is_looking_down = False
 
-        # 1. Head Pose (improved with cheek/eye landmarks)
-        try:
-            pose = _compute_head_pose(landmarks, img_w, img_h)
+        if face_results.face_landmarks:
+            face_detected = True
+            num_faces = len(face_results.face_landmarks)
+            if num_faces > 1:
+                logger.info(f"Multiple faces detected: {num_faces}")
+                cv2.putText(img, "MULTIPLE FACES", (50, 140), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                face_reason = "multiple_faces_detected"
             
-            # Determine if they are looking down based on Pitch
-            is_looking_down = pose['pitch_offset'] < -0.05
+            # Use the first face for detailed pose analysis
+            landmarks = face_results.face_landmarks[0]
+            
+            # --- Single face analysis with SVR Head Pose + Gaze ---
+            suspicion_score = 0.0
+            signals: Dict[str, float] = {}
 
-            # Yaw check (head turned sideways)
-            if pose['yaw_offset'] > YAW_THRESHOLD:
-                # When looking down, be lenient on Yaw
-                # Head rotation calculations are less accurate when looking down
-                if is_looking_down:
-                    # Only flag if it's EXTREME yaw when looking down
-                    if pose['yaw_offset'] > (YAW_THRESHOLD * 1.5):
-                        suspicion_score += 0.4
-                        signals['head_turned_sideways_while_down'] = pose['yaw_offset']
-                else:
-                    # Normal look-ahead yaw check
-                    suspicion_score += 0.4
-                    signals['head_turned_sideways'] = pose['yaw_offset']
-                    logger.debug(f"Yaw signal: offset={pose['yaw_offset']:.2f}")
-
-            # Pitch check (head up — not allowed)
-            if pose['pitch_offset'] > PITCH_UP_THRESHOLD:
-                suspicion_score += 0.6
-                signals['head_turned_up'] = pose['pitch_offset']
-                logger.debug(f"Pitch up signal: offset={pose['pitch_offset']:.2f}")
-
-        except (IndexError, KeyError):
-            is_looking_down = False
-
-        # 2. Eye Gaze Estimation
-        # Skip gaze check if looking down (iris landmarks are unreliable)
-        if not is_looking_down:
+            # 1. Head Pose (SVR-based robust estimation)
             try:
-                left_ratio, right_ratio = _compute_gaze_ratio(landmarks, img_w, img_h)
-                avg_gaze = (left_ratio + right_ratio) / 2
+                # Draw the 7 SVR keypoints for debugging
+                target_idx = [SHP_NOSE, SHP_FOREHEAD, SHP_LEFT_EYE, SHP_MOUTH_LEFT, SHP_CHIN, SHP_RIGHT_EYE, SHP_MOUTH_RIGHT]
+                for idx in target_idx:
+                    lm = landmarks[idx]
+                    cv2.circle(img, (int(lm.x * img_w), int(lm.y * img_h)), 3, (255, 0, 255), -1)
 
-                if avg_gaze < GAZE_LEFT_THRESHOLD:
-                    suspicion_score += 0.5
-                    signals['gaze_left'] = avg_gaze
-                    logger.debug(f"Gaze signal: L={left_ratio:.2f} R={right_ratio:.2f} avg={avg_gaze:.2f}")
-                elif avg_gaze > GAZE_RIGHT_THRESHOLD:
-                    suspicion_score += 0.5
-                    signals['gaze_right'] = avg_gaze
-                    logger.debug(f"Gaze signal: L={left_ratio:.2f} R={right_ratio:.2f} avg={avg_gaze:.2f}")
+                pose = _compute_head_pose(landmarks, img_w, img_h)
+                yaw = pose['yaw_offset']
+                pitch = pose['pitch_offset']
+                
+                # Draw 3D axes at the nose for debugging
+                nose_lm = landmarks[SHP_NOSE]
+                _draw_head_pose_axes(img, pose['raw_yaw'], pose['raw_pitch'], pose['raw_roll'], 
+                                     nose_lm.x * img_w, nose_lm.y * img_h, size=60)
 
-            except (IndexError, KeyError):
-                pass
+                # Determine if they are looking down based on Pitch
+                is_looking_down = pitch < -0.05
+
+                # Draw pose info on image for proctoring transparency
+                pose_color = (0, 255, 255) # Yellow/Cyan
+                cv2.putText(img, f"Yaw: {yaw:.2f} Pitch: {pitch:.2f}", (img_w - 200, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, pose_color, 2)
+                if is_looking_down:
+                    cv2.putText(img, "STATUS: LOOKING DOWN", (img_w - 250, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                # Yaw check (head turned sideways)
+                if yaw > YAW_THRESHOLD:
+                    if is_looking_down:
+                        if yaw > (YAW_THRESHOLD * 1.5):
+                            suspicion_score += 0.4
+                            signals['head_turned_sideways_while_down'] = yaw
+                    else:
+                        suspicion_score += 0.4
+                        signals['head_turned_sideways'] = yaw
+
+                # Pitch check (head turned up — not allowed)
+                if pitch > PITCH_UP_THRESHOLD:
+                    suspicion_score += 0.6
+                    signals['head_turned_up'] = pitch
+
+                # 2. Eye Gaze Estimation (skipped if looking down)
+                if not is_looking_down:
+                    left_ratio, right_ratio = _compute_gaze_ratio(landmarks, img_w, img_h)
+                    avg_gaze = (left_ratio + right_ratio) / 2
+
+                    if avg_gaze < GAZE_LEFT_THRESHOLD:
+                        suspicion_score += 0.5
+                        signals['gaze_left'] = avg_gaze
+                        cv2.putText(img, f"GAZE LEFT: {avg_gaze:.2f}", (10, img_h - 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    elif avg_gaze > GAZE_RIGHT_THRESHOLD:
+                        suspicion_score += 0.5
+                        signals['gaze_right'] = avg_gaze
+                        cv2.putText(img, f"GAZE RIGHT: {avg_gaze:.2f}", (10, img_h - 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+                # Final suspect check for this frame
+                if suspicion_score >= SUSPICION_SCORE_THRESHOLD:
+                    face_reason = max(signals, key=signals.get) if signals else "general_suspicion"
+                else:
+                    tracker = _get_tracker(session_id)
+                    face_reason = tracker.add_frame(suspicion_score, signals)
+
+            except Exception as e:
+                logger.error(f"Face processing failed: {e}")
+        
         else:
-            logger.debug("Skipping gaze check (user looking down)")
+            # No face detected by MediaPipe
+            if person_count >= 1:
+                logger.info("Person detected but face is invisible. Warning issued.")
+                cv2.putText(img, "FACE NOT VISIBLE", (50, 110), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                face_reason = "face_not_visible"
+            else:
+                face_reason = "user_absent_from_chair"
 
-        # New Logic: Immediate Logging
-        if suspicion_score >= SUSPICION_SCORE_THRESHOLD:
-            # Get the most suspicious signal name to use as the reason
-            reason = max(signals, key=signals.get) if signals else "general_suspicion"
-            logger.info(f"IMMEDIATE VIOLATION: {reason} (Score: {suspicion_score})")
-            return reason
+        # ===== PHASE 3: Prioritize and Return =====
+        final_reason = None
+        if person_count > 1:
+            final_reason = "multiple_people_detected"
+            cv2.putText(img, "ALERT: MULTIPLE PEOPLE", (50, 50), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+        elif suspicious_objects:
+            final_reason = f"forbidden_object_{suspicious_objects[0].replace(' ', '_')}"
+            cv2.putText(img, f"ALERT: {suspicious_objects[0].upper()}", (50, 80), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+        else:
+            # Use the face-based reason if YOLO is clean
+            final_reason = face_reason
 
-        # Fallback to tracker for long-term patterns if score is low but non-zero
-        tracker = _get_tracker(session_id)
-        return tracker.add_frame(suspicion_score, signals)
+        if final_reason:
+            cv2.putText(img, f"FINAL: {final_reason}", (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            return final_reason, get_encoded(img)
+
+        return None, get_encoded(img)
 
     except Exception as e:
         logger.error(f"Image analysis error: {e}")
-        return None
+        return None, image_bytes
+
 
 
 # ============================================================
