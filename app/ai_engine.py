@@ -408,12 +408,6 @@ def analyze_image(image_bytes: bytes, session_id: str = "default") -> Tuple[Opti
                 logger.info(f"Flag: head_turned_up (pitch={pitch_deg:.1f})")
                 return "head_turned_up", get_encoded(img)
 
-            if pitch_deg > PITCH_DOWN_MIN_DEG:
-                _draw_all_annotations(img, img_h, img_w, True, face_bbox, pose,
-                                     "not_looking_down", f"NOT LOOKING DOWN (pitch={pitch_deg:.1f})")
-                logger.info(f"Flag: not_looking_down (pitch={pitch_deg:.1f})")
-                return "not_looking_down", get_encoded(img)
-
         else:
             # Pose could not be computed (e.g. partial face, 6DRepNet failed)
             # Face is present (permissive check passed) - allow frame (no pose check)
