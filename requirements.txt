@@ -12,3 +12,6 @@ mediapipe
 librosa
 scikit-learn
 joblib
+torch
+torchvision
+sixdrepnet

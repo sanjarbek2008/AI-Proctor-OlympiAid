@@ -158,3 +158,4 @@ Thumbs.db
 # Project specific
 yolov8n.pt
 face_landmarker.task
+blaze_face_short_range.tflite
