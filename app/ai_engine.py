@@ -59,16 +59,31 @@ try:
     if not os.path.exists(face_landmarker_path):
         face_landmarker_path = 'face_landmarker.task'
     
-    # Use GPU delegate if available
-    delegate = mp_python.BaseOptions.Delegate.GPU if device == "cuda" else mp_python.BaseOptions.Delegate.CPU
-    base_options = mp_python.BaseOptions(model_asset_path=face_landmarker_path, delegate=delegate)
-    
-    options = vision.FaceLandmarkerOptions(base_options=base_options,
-                                           output_face_blendshapes=True,
-                                           output_facial_transformation_matrixes=True,
-                                           num_faces=2)
-    face_landmarker = vision.FaceLandmarker.create_from_options(options)
-    logger.info(f"MediaPipe Face Landmarker loaded successfully on {device.upper()}.")
+    def create_landmarker(use_gpu=False):
+        delegate = mp_python.BaseOptions.Delegate.GPU if use_gpu else mp_python.BaseOptions.Delegate.CPU
+        base_options = mp_python.BaseOptions(model_asset_path=face_landmarker_path, delegate=delegate)
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            output_face_blendshapes=True,
+            output_facial_transformation_matrixes=True,
+            num_faces=2
+        )
+        return vision.FaceLandmarker.create_from_options(options)
+
+    try:
+        if device == "cuda":
+            face_landmarker = create_landmarker(use_gpu=True)
+            logger.info("MediaPipe Face Landmarker loaded successfully on GPU.")
+        else:
+            face_landmarker = create_landmarker(use_gpu=False)
+            logger.info("MediaPipe Face Landmarker loaded successfully on CPU.")
+    except Exception as gpu_e:
+        if device == "cuda":
+            logger.warning(f"MediaPipe Face Landmarker GPU init failed (possibly build flags): {gpu_e}. Falling back to CPU.")
+            face_landmarker = create_landmarker(use_gpu=False)
+            logger.info("MediaPipe Face Landmarker loaded successfully on CPU (fallback).")
+        else:
+            raise gpu_e
 except Exception as e:
     logger.error(f"MediaPipe Face Landmarker init failed: {e}")
     face_landmarker = None
@@ -88,15 +103,29 @@ try:
         except Exception as dl_e:
             logger.warning(f"Could not download face detector: {dl_e}. Face presence check may fail.")
     if os.path.exists(face_detector_path):
-        # Use GPU delegate if available
-        delegate = mp_python.BaseOptions.Delegate.GPU if device == "cuda" else mp_python.BaseOptions.Delegate.CPU
-        fd_options = vision.FaceDetectorOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=face_detector_path, delegate=delegate),
-            min_detection_confidence=0.3,  # Low threshold for partial faces
-            min_suppression_threshold=0.5
-        )
-        face_detector = vision.FaceDetector.create_from_options(fd_options)
-        logger.info(f"MediaPipe Face Detector loaded successfully on {device.upper()}.")
+        def create_detector(use_gpu=False):
+            delegate = mp_python.BaseOptions.Delegate.GPU if use_gpu else mp_python.BaseOptions.Delegate.CPU
+            fd_options = vision.FaceDetectorOptions(
+                base_options=mp_python.BaseOptions(model_asset_path=face_detector_path, delegate=delegate),
+                min_detection_confidence=0.3,
+                min_suppression_threshold=0.5
+            )
+            return vision.FaceDetector.create_from_options(fd_options)
+
+        try:
+            if device == "cuda":
+                face_detector = create_detector(use_gpu=True)
+                logger.info("MediaPipe Face Detector loaded successfully on GPU.")
+            else:
+                face_detector = create_detector(use_gpu=False)
+                logger.info("MediaPipe Face Detector loaded successfully on CPU.")
+        except Exception as gpu_e:
+            if device == "cuda":
+                logger.warning(f"MediaPipe Face Detector GPU init failed: {gpu_e}. Falling back to CPU.")
+                face_detector = create_detector(use_gpu=False)
+                logger.info("MediaPipe Face Detector loaded successfully on CPU (fallback).")
+            else:
+                raise gpu_e
 except Exception as e:
     logger.error(f"MediaPipe Face Detector init failed: {e}")
     face_detector = None
