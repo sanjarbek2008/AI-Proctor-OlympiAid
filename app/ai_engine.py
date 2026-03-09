@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 # Model Initialization
 # ============================================================
 
+# Determine device
+device = "cuda" if torch.cuda.is_available() else "cpu"
+logger.info(f"AI Engine is using device: {device.upper()}")
+
 # 1. Initialize Silero VAD
 try:
     vad_model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
@@ -32,7 +36,8 @@ try:
                                       force_reload=False,
                                       trust_repo=True)
     (get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) = utils
-    logger.info("Silero VAD model loaded successfully.")
+    vad_model = vad_model.to(device)
+    logger.info(f"Silero VAD model loaded successfully on {device.upper()}.")
 except Exception as e:
     logger.error(f"Silero VAD init failed: {e}")
     vad_model = None
@@ -40,6 +45,8 @@ except Exception as e:
 # 2. Initialize YOLO
 try:
     model = YOLO("yolov8n.pt")
+    model.to(device)
+    logger.info(f"YOLO model loaded successfully on {device.upper()}.")
 except Exception as e:
     logger.error(f"YOLO init failed: {e}")
     model = None
@@ -51,13 +58,17 @@ try:
     face_landmarker_path = os.path.join(project_root, 'face_landmarker.task')
     if not os.path.exists(face_landmarker_path):
         face_landmarker_path = 'face_landmarker.task'
-    base_options = mp_python.BaseOptions(model_asset_path=face_landmarker_path)
+    
+    # Use GPU delegate if available
+    delegate = mp_python.BaseOptions.Delegate.GPU if device == "cuda" else mp_python.BaseOptions.Delegate.CPU
+    base_options = mp_python.BaseOptions(model_asset_path=face_landmarker_path, delegate=delegate)
+    
     options = vision.FaceLandmarkerOptions(base_options=base_options,
                                            output_face_blendshapes=True,
                                            output_facial_transformation_matrixes=True,
                                            num_faces=2)
     face_landmarker = vision.FaceLandmarker.create_from_options(options)
-    logger.info("MediaPipe Face Landmarker loaded successfully.")
+    logger.info(f"MediaPipe Face Landmarker loaded successfully on {device.upper()}.")
 except Exception as e:
     logger.error(f"MediaPipe Face Landmarker init failed: {e}")
     face_landmarker = None
@@ -77,13 +88,15 @@ try:
         except Exception as dl_e:
             logger.warning(f"Could not download face detector: {dl_e}. Face presence check may fail.")
     if os.path.exists(face_detector_path):
+        # Use GPU delegate if available
+        delegate = mp_python.BaseOptions.Delegate.GPU if device == "cuda" else mp_python.BaseOptions.Delegate.CPU
         fd_options = vision.FaceDetectorOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=face_detector_path),
+            base_options=mp_python.BaseOptions(model_asset_path=face_detector_path, delegate=delegate),
             min_detection_confidence=0.3,  # Low threshold for partial faces
             min_suppression_threshold=0.5
         )
         face_detector = vision.FaceDetector.create_from_options(fd_options)
-        logger.info("MediaPipe Face Detector loaded successfully.")
+        logger.info(f"MediaPipe Face Detector loaded successfully on {device.upper()}.")
 except Exception as e:
     logger.error(f"MediaPipe Face Detector init failed: {e}")
     face_detector = None
@@ -92,8 +105,10 @@ except Exception as e:
 head_pose_model = None
 try:
     from sixdrepnet.regressor import SixDRepNet_Detector
-    head_pose_model = SixDRepNet_Detector(gpu_id=-1)  # CPU mode
-    logger.info("6DRepNet head pose model loaded successfully.")
+    # gpu_id: 0 for GPU, -1 for CPU
+    gpu_id = 0 if device == "cuda" else -1
+    head_pose_model = SixDRepNet_Detector(gpu_id=gpu_id)
+    logger.info(f"6DRepNet head pose model loaded successfully on {'GPU' if gpu_id == 0 else 'CPU'}.")
 except Exception as e:
     logger.error(f"6DRepNet init failed: {e}")
     head_pose_model = None
