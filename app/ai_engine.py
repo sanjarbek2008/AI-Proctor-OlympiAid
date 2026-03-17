@@ -496,7 +496,7 @@ def analyze_audio(audio_bytes: bytes) -> Optional[str]:
             logger.info(f"Suspicious silence: RMS={mean_rms}")
             return "suspicious_silence"
 
-        audio_tensor = torch.from_numpy(y)
+        audio_tensor = torch.from_numpy(y).to(device)
         chunk_size = 512
         speech_probs = []
 
@@ -505,7 +505,7 @@ def analyze_audio(audio_bytes: bytes) -> Optional[str]:
             if len(chunk) < chunk_size:
                 pad_size = chunk_size - len(chunk)
                 chunk = torch.nn.functional.pad(chunk, (0, pad_size))
-            prob = vad_model(chunk, 16000).item()
+            prob = vad_model(chunk.to(device), 16000).item()
             speech_probs.append(prob)
 
         avg_speech_prob = sum(speech_probs) / len(speech_probs) if speech_probs else 0.0
